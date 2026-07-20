@@ -56,9 +56,14 @@ asserting a text equivalent for any color or audio cue.
 
 ### Docs and writing
 
-- User-facing docs, README, guides: `writing-craft` skill. Plain language, no em-dashes,
-  no AI-slop vocabulary.
-- Commits, PR descriptions, reviews: `writing-style` skill. Direct, why over what.
+- **All documentation goes through a writing skill — internal docs included.** Use
+  `writing-craft` for user-facing docs (README, guides, release notes) and equally for
+  internal docs: design docs, decision records in `docs/decisions/`, specs, planning
+  documents, and architecture notes. Use `writing-style` for commits, PR descriptions,
+  issue comments, and reviews.
+- Plain language always. No em-dashes unless absolutely necessary; prefer commas,
+  colons, or separate sentences. No AI-slop vocabulary. Tables for reference data,
+  lists for steps, prose for explanation.
 
 ### Project-specific rules
 
