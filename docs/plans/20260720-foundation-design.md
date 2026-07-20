@@ -11,16 +11,49 @@ The stack the project commits to, pending the Phase 0 spikes:
 
 | Concern | Crate | Version | Why |
 |---|---|---|---|
-| UI toolkit | `wxdragon` | 0.9.17 | Native Win32/Cocoa/GTK controls, so the platform accessibility tree comes from the OS, not a reimplementation |
+| UI toolkit | `wxdragon` (features: `webview`, `richtext`) | 0.9.17 | Native Win32/Cocoa/GTK controls, so the platform accessibility tree comes from the OS; WebView for rich HTML views (pattern proven in Wixen Mail) |
 | Announcements | `accesskit` + platform adapters | 0.24.1 | Live regions (Polite/Assertive) for speech that has no widget to live in |
 | Matrix protocol | `matrix-sdk`, `matrix-sdk-ui` | 0.18.0 | Maintained by matrix.org, powers Element X; E2EE, sliding sync, timeline API |
+| HTML sanitization | `ammonia` + `html-escape` | current | Every HTML body sanitized before the WebView sees it (Wixen Mail pattern) |
+| Outgoing formatting | `pulldown-cmark` | current | Markdown in the composer to Matrix HTML on send, the accessible chat convention |
+| Spell check | `spellbook` | current | Pure Rust Hunspell-compatible, already proven in Wixen Mail |
 | Async runtime | `tokio` | current | Required by matrix-sdk |
 | Secrets | `keyring` | current | OS credential store for tokens and store passphrases |
 | Config | `serde` + `toml` | current | Same pattern as Wixen Terminal |
 | Errors | `thiserror` | current | Typed errors in library crates |
 | Logging | `tracing` | current | Structured, no println |
 | Audio cues | `rodio` | current | Every cue paired with a visual and announced equivalent |
-| Link opening | `opener` | current | With a scheme allowlist; Wixen Terminal shipped a hole here once |
+| Link opening | `open` | current | With a scheme allowlist; Wixen Terminal shipped a hole here once |
+
+### Reuse from Wixen Mail
+
+Wixen Mail (`C:\Users\prati\Documents\projects\Wixen-Mail`) already ships wxdragon
+in production and settles several questions this plan had left open. Port these
+patterns rather than reinventing them:
+
+- **Rich HTML viewing** (`src/presentation/html_renderer.rs`, `wx_app.rs`):
+  `WebView` with the Edge (WebView2) backend renders sanitized HTML. The recipe:
+  `ammonia::clean` on every body; `wrap_for_webview` builds a full document with
+  readable typography, dark-mode support, and `<pre>` wrapping for plain text;
+  `WebView::is_backend_available` checked at startup with graceful degradation;
+  `on_navigating` vetoes all navigation and opens links in the default browser;
+  `on_new_window` vetoed; dev tools and the browser context menu disabled; a
+  custom context menu raised through a script message handler into a native wx
+  popup menu, which keeps the menu itself screen-reader native.
+- **Accessible text alternative** (`render_for_accessibility`): links inline as
+  "text [URL]" plus an enumerated link summary, images as "[Image: alt]" or
+  "[Image]" when the sender provided nothing. Wixen Chat uses the same dual
+  rendering: rich WebView view and accessible text for announcements and
+  fallback.
+- **OAuth loopback flow** (`oauth2` + `tiny_http`): PKCE with a localhost
+  redirect capture, reusable nearly as-is for Matrix OIDC login.
+- **Spell check**: `spellbook` integration exists and works; lift it.
+- **Compose**: `RichTextCtrl` editor with formatting commands and a WebView
+  preview dialog, if a rich composer is wanted later; v1 composes in markdown.
+
+Start as ports (duplication over premature abstraction); if the HTML pipeline
+stays near-identical, extracting a shared `wixen-html` crate both apps depend on
+is a later decision doc, not a day-one framework.
 
 ## The Four Questions
 
@@ -103,6 +136,9 @@ crates/
                       # into core types. Implements core's ChatProtocol trait.
   wixen-chat-announce/# the announcement channel: queue, priorities, coalescing,
                       # flood bounds, and the AccessKit live-region surface
+  wixen-chat-render/  # HTML pipeline: sanitize (ammonia), timeline document
+                      # assembly for the WebView, accessible text alternative,
+                      # markdown-to-HTML for outgoing (ported from Wixen Mail)
   wixen-chat-ui/      # wxdragon: windows, room list, timeline, composer, dialogs
   wixen-chat-config/  # TOML config, settings persistence, schema
 ```
@@ -153,11 +189,23 @@ Design:
 
 - Room list: native list control, one item per room, name plus unread count plus
   mention state in the accessible name. Never color alone for unread.
-- Timeline: native list control, one item per message; accessible name is
-  "sender, content, time, state" with edits and replies declared in text.
-  Virtualized only if the native control stays accessible when virtual (spike).
-- Composer: native multiline text control. Standard keys. Enter sends,
-  Shift+Enter for newline, both remappable.
+- Timeline: **rich HTML from the beginning**, rendered in a wxdragon `WebView`
+  using the Wixen Mail pipeline. The conversation is assembled as a semantic
+  HTML document: each message an `article` with sender, time, and state exposed
+  as text and structure, headings or ARIA landmarks for navigation by screen
+  reader quick keys, links real and openable, code blocks and quotes as real
+  `pre`/`blockquote`. WebView2 (Windows), WKWebView (macOS), and WebKitGTK
+  (Linux) each expose a full browser accessibility tree, so screen reader
+  browse-mode navigation of the conversation comes from the platform. All
+  navigation vetoed; links open in the default browser through the scheme
+  allowlist. Every body sanitized with ammonia before the WebView sees it.
+  Two shapes go to the Phase 0 spike: a single conversation document (append
+  new messages at the end, stable DOM so the reading position survives
+  updates) versus native list plus per-message rich view. The spike's NVDA
+  results decide; the conversation document is the working favorite.
+- Composer: native multiline text control, markdown composed to Matrix HTML on
+  send via `pulldown-cmark`. Standard keys. Enter sends, Shift+Enter for
+  newline, both remappable. Spell check via `spellbook` from Wixen Mail.
 - Full keyboard map documented and platform-conventional; every action reachable
   from the menu bar (discoverable by screen reader users), no drag-only anything.
 - SAS device verification presents emoji by localized name in text, and the
@@ -185,13 +233,18 @@ Gaps in the proposed stack, with the plan's answer for each:
 4. **Local search in encrypted rooms.** No maintained Rust crate provides indexed
    E2EE-friendly message search. v1 ships server-side search for unencrypted
    rooms and states the limitation. A local index is a documented later phase.
-5. **Rich message rendering.** Matrix messages carry an HTML subset. wx rich
-   controls have weak accessibility. v1 renders to plain text preserving meaning
-   (links enumerated and openable, code blocks and quotes declared in text),
-   which is better for the target user than a pretty inaccessible view.
-6. **Spell check.** No good cross-platform Rust story. Deferred; documented.
-   Platform-native checkers (ISpellChecker, NSSpellChecker, enchant) are the
-   likely later route.
+5. **Rich message rendering: resolved, with residual risks.** Wixen Mail proves
+   the WebView pipeline (ammonia sanitize, vetoed navigation, accessible text
+   alternative), so rich HTML views ship from the beginning. What remains open:
+   whether a screen reader's browse-mode reading position stays stable while
+   the conversation document receives live appends (the Phase 0 spike tests
+   this under message load), and the WebView2 runtime dependency on Windows
+   (ships with Windows 11, needs the evergreen installer on some Windows 10
+   machines; the packaging phase handles it, and startup degrades gracefully
+   to the accessible-text view when no backend is available, as Wixen Mail
+   already does).
+6. **Spell check: resolved.** `spellbook` (pure Rust, Hunspell-compatible) is
+   already integrated in Wixen Mail; port that integration.
 7. **Notifications on Windows.** `notify-rust` is strongest on Linux/macOS; on
    Windows toast notifications may need `tauri-winrt-notification`. Decided in
    the notifications phase behind one trait.
@@ -247,10 +300,16 @@ Gaps in the proposed stack, with the plan's answer for each:
 - Create: `docs/spikes/20260720-wx-a11y.md` (findings)
 
 - [ ] build a wxdragon app with the exact widgets the client needs: frame, menu
-      bar with accelerators, list control, multiline text, button row, modal dialog
+      bar with accelerators, list control, multiline text, button row, modal
+      dialog, and a WebView (Edge backend) loading a sanitized conversation-shaped
+      document (start from Wixen Mail's `wrap_for_webview` and hardening recipe)
 - [ ] verify `call_after` dispatch from a background thread under a 100-msg/s load
 - [ ] NVDA pass on Windows: every control reports name/role/value; focus is sane;
       list updates do not steal focus or re-announce the world
+- [ ] NVDA pass on the WebView conversation document: browse-mode navigation by
+      heading/link works; live appends at the end do not move the reading
+      position or re-announce existing content; compare against the native-list
+      timeline shape and record which shape wins
 - [ ] record VoiceOver and Orca results (or gate them with a date if hardware
       access delays them; do not skip silently)
 - [ ] write findings including the widget allowlist and any generic-widget traps
@@ -290,7 +349,8 @@ Gaps in the proposed stack, with the plan's answer for each:
 **Files:**
 - Modify: `Cargo.toml`
 - Create: `crates/wixen-chat-core/`, `crates/wixen-chat-announce/`,
-  `crates/wixen-chat-config/` (Cargo.toml + lib.rs each)
+  `crates/wixen-chat-render/`, `crates/wixen-chat-config/`
+  (Cargo.toml + lib.rs each)
 
 - [ ] convert to workspace keeping root `wixen-chat` binary and existing test green
 - [ ] workspace-level lints: deny unwrap/expect in production code, warn unsafe
@@ -324,6 +384,26 @@ Gaps in the proposed stack, with the plan's answer for each:
 - [ ] TDD rate bound and dedup; TDD global mute
 - [ ] property test: no input sequence exceeds the rate bound; no assertive
       announcement is ever dropped or reordered behind polite ones
+- [ ] run fmt, clippy, tests: must pass before next task
+
+### Phase 1, Task 4: HTML render pipeline
+
+**Files:**
+- Create: `crates/wixen-chat-render/src/{sanitize,document,accessible,outgoing}.rs`
+
+- [ ] port Wixen Mail's sanitize + `wrap_for_webview` pattern: TDD ammonia
+      profile for the Matrix HTML subset, full-document wrapper with dark mode
+      and system-font typography, `<pre>` path for plain bodies
+- [ ] TDD conversation document assembly: messages as semantic `article`
+      elements with sender/time/state as text, stable element ids for appends,
+      edits and reactions updating in place
+- [ ] port `render_for_accessibility`: accessible text alternative with inline
+      "text [URL]" links, link summary, "[Image: alt]" and no-alt callout;
+      shared by announcements and the no-WebView fallback
+- [ ] TDD outgoing markdown to Matrix HTML via pulldown-cmark
+- [ ] property tests: sanitizer and document assembly never panic on arbitrary
+      input; no unsanitized string can reach a document (type-state or newtype
+      enforced); multibyte safety
 - [ ] run fmt, clippy, tests: must pass before next task
 
 ### Phase 2, Task 1: Announcer delivery surface
@@ -382,8 +462,13 @@ Gaps in the proposed stack, with the plan's answer for each:
 
 - [ ] room list bound to sync updates: name, unread, mention state in accessible
       name; activity never steals focus
-- [ ] timeline bound to timeline diffs: stable focus position across updates,
-      new-message insertion without re-announcement of existing items
+- [ ] timeline: WebView bound to timeline diffs through the render pipeline in
+      the shape the spike chose; WebView hardening ported from Wixen Mail
+      (navigation vetoed, links to default browser through the allowlist, new
+      windows blocked, dev tools off, accessible native context menu via
+      script message handler); reading position stable across live appends,
+      no re-announcement of existing items; accessible-text fallback when no
+      WebView backend is available
 - [ ] announcements flowing end to end: policy engine to Announcer while window
       unfocused or in another room
 - [ ] read receipts sent on read; unread state updates
@@ -396,6 +481,8 @@ Gaps in the proposed stack, with the plan's answer for each:
 - [ ] edits, replies, reactions: create and render, declared in accessible text
 - [ ] typing notifications out and in (in = polite announcement kind, default per
       verbosity)
+- [ ] spell check in the composer via spellbook, ported from Wixen Mail;
+      suggestions reachable by keyboard and announced
 - [ ] property test on outgoing body handling (multibyte safety)
 - [ ] manual NVDA pass; run checks
 
@@ -411,13 +498,15 @@ Gaps in the proposed stack, with the plan's answer for each:
 
 ### Phase 4, Task 2: Media and files
 
-- [ ] incoming images: alt text announced when present, "image, no description
-      provided by sender" when absent; open-externally action with scheme
-      allowlist via `opener`
+- [ ] incoming images: rendered inline in the timeline document with real `alt`
+      when the sender provided one, "image, no description provided by sender"
+      declared when absent; media fetched only through the Matrix media API
+      (no arbitrary remote HTTP from the document; the sanitizer strips
+      external image sources); open-externally action with scheme allowlist
 - [ ] outgoing images/files: alt text prompt (skippable, never blocking), size
       confirmation, progress declared politely and boundedly
-- [ ] no inline media rendering in v1 beyond thumbnails with accessible names
-- [ ] tests for allowlist (file://, ms-settings: etc. refused); run checks
+- [ ] tests for allowlist (file://, ms-settings: etc. refused) and for the
+      external-source strip; run checks
 
 ### Phase 4, Task 3: Notifications and sounds
 
@@ -471,7 +560,8 @@ Gaps in the proposed stack, with the plan's answer for each:
 
 - **Rust edition 2024**, MSRV 1.93 (matrix-sdk 0.18 requirement; workspace pins it).
 - **Message flow inbound**: matrix-sdk-ui diff → mapping → core value → (a) update
-  channel → call_after → widget update on UI thread; (b) AnnouncementRequest →
+  channel → call_after → render pipeline → WebView document update on UI thread;
+  (b) AnnouncementRequest (built from the accessible-text rendering) →
   policy engine → Announcer.
 - **Announcement request**: `{ kind: MessageNew | Mention | Membership | Presence |
   Typing | Connection | Error | Verification, room: Option<RoomId>, text: String,
@@ -493,10 +583,14 @@ Gaps in the proposed stack, with the plan's answer for each:
 - Security review of keyring usage, store encryption, and the URL allowlist.
 
 **External work:**
-- Packaging: MSI or MSIX, dmg, flatpak; code signing certificates.
+- Packaging: MSI or MSIX (bundling or bootstrapping the WebView2 evergreen
+  runtime for Windows 10 machines without it), dmg, flatpak; code signing
+  certificates.
 - Server-side: document the homeserver sliding-sync requirement if the spike
   found degradation.
 - NVDA add-on interop check with Terminal Access (no interference; they serve
   different apps).
-- VoIP, local encrypted search, spell check, i18n translations: documented gaps,
-  each needs its own decision doc before work starts.
+- VoIP, local encrypted search, i18n translations: documented gaps, each needs
+  its own decision doc before work starts.
+- Extracting a shared `wixen-html` crate with Wixen Mail once the ported
+  pipeline stabilizes, if the duplication starts to drift.
