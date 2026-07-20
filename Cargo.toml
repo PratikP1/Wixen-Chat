@@ -1,0 +1,17 @@
+[package]
+name = "wixen-chat"
+version = "0.1.0"
+edition = "2024"
+description = "A fully accessible, cross-platform chat client based on the Matrix specification"
+license = "MIT"
+repository = "https://github.com/PratikP1/Wixen-Chat"
+rust-version = "1.97"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
